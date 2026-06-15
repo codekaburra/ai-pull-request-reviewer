@@ -7,7 +7,7 @@ import { checkAvailableModels } from './llm/client.js'
 import { runModelReview } from './reviewer.js'
 import type { OnChunkReviewed } from './reviewer.js'
 import { config } from './config.js'
-import type { PRInfo, ModelReviewResult, DiffPositionMap } from './types.js'
+import type { PRInfo, ModelReviewResult } from './types.js'
 
 function printUsage(): void {
   console.log(`
@@ -53,11 +53,14 @@ function parsePrArgs(args: string[]): { owner: string; repo: string; prNumber: n
   return null
 }
 
-async function runAllModels(pr: PRInfo, onChunkReviewed?: OnChunkReviewed): Promise<ModelReviewResult[]> {
+async function runAllModels(
+  models: { name: string }[],
+  pr: PRInfo,
+  onChunkReviewed?: OnChunkReviewed,
+): Promise<ModelReviewResult[]> {
   const results: ModelReviewResult[] = []
-  for (let i = 0; i < config.models.length; i++) {
-    const modelConfig = config.models[i]!
-    results.push(await runModelReview(modelConfig.name, pr, i, config.models.length, onChunkReviewed))
+  for (let i = 0; i < models.length; i++) {
+    results.push(await runModelReview(models[i]!.name, pr, i, models.length, onChunkReviewed))
   }
   return results
 }
@@ -100,7 +103,7 @@ async function main(): Promise<void> {
       process.exit(0)
     }
 
-    const results = await runAllModels(pr)
+    const results = await runAllModels(activeModels, pr)
     printConsoleReport(results)
     process.exit(0)
   }
@@ -128,7 +131,7 @@ async function main(): Promise<void> {
     await postFileReview(owner, repo, prNumber, model, findings, chunk.filename, chunkIndex, totalChunks, positionMap)
   }
 
-  const results = await runAllModels(pr, onChunkReviewed)
+  const results = await runAllModels(activeModels, pr, onChunkReviewed)
 
   for (const result of results) {
     await postModelSummary(owner, repo, prNumber, result)
