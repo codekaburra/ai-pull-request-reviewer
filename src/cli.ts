@@ -15,25 +15,34 @@ Usage:
     npm run review -- --local <base-branch>     # e.g. --local main → main...HEAD
 
   GitHub PR:
-    npm run review <owner/repo> <pr-number>
-    npm run review <owner/repo#pr-number>
+    npm run review -- https://github.com/owner/repo/pull/123
+    npm run review -- owner/repo#123
+    npm run review -- owner/repo 123
 
 Examples:
   npm run review -- --local
   npm run review -- --local main
-  npm run review facebook/react 1234
-  npm run review facebook/react#1234
+  npm run review -- https://github.com/facebook/react/pull/1234
+  npm run review -- facebook/react#1234
 `)
 }
 
 function parsePrArgs(args: string[]): { owner: string; repo: string; prNumber: number } | null {
   const combined = args.join(' ').trim()
 
+  // Full GitHub URL: https://github.com/owner/repo/pull/123
+  const urlMatch = combined.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
+  if (urlMatch) {
+    return { owner: urlMatch[1]!, repo: urlMatch[2]!, prNumber: parseInt(urlMatch[3]!, 10) }
+  }
+
+  // owner/repo#123
   const withHash = combined.match(/^([^/]+)\/([^#\s]+)#(\d+)$/)
   if (withHash) {
     return { owner: withHash[1]!, repo: withHash[2]!, prNumber: parseInt(withHash[3]!, 10) }
   }
 
+  // owner/repo 123
   const separate = combined.match(/^([^/]+)\/(\S+)\s+(\d+)$/)
   if (separate) {
     return { owner: separate[1]!, repo: separate[2]!, prNumber: parseInt(separate[3]!, 10) }
