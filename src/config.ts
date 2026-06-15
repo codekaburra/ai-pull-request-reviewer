@@ -27,8 +27,8 @@ export const config: Config = {
   },
   models: [
     { name: 'phi4:latest',         displayName: 'phi4' },
+    { name: 'mistral:7b',           displayName: 'mistral:7b' },
     { name: 'starcoder2:7b',       displayName: 'starcoder2:7b' },
-    { name: 'mistral:latest',      displayName: 'mistral' },
   ],
   review: {
     maxTokensPerChunk: 6000,
