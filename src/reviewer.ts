@@ -1,19 +1,24 @@
 import { reviewChunk } from './llm/client.js'
 import { parseDiff, splitChunks } from './github/diff-parser.js'
-import type { PRInfo, ModelReviewResult, ReviewFinding } from './types.js'
+import type { PRInfo, ModelReviewResult, ReviewFinding, DiffChunk } from './types.js'
 import { config } from './config.js'
 
-const CHARS_PER_TOKEN = 4  // rough estimate
+const CHARS_PER_TOKEN = 4
 
-/**
- * Runs one model through the full PR review, chunk by chunk, and returns its findings.
- * Reporting (console for local mode, GitHub comments for PR mode) is the caller's job.
- */
+export type OnChunkReviewed = (
+  model: string,
+  chunk: DiffChunk,
+  findings: ReviewFinding[],
+  chunkIndex: number,
+  totalChunks: number,
+) => Promise<void>
+
 export async function runModelReview(
   model: string,
   pr: PRInfo,
   modelIndex: number,
-  totalModels: number
+  totalModels: number,
+  onChunkReviewed?: OnChunkReviewed,
 ): Promise<ModelReviewResult> {
   console.log(`\n${'─'.repeat(50)}`)
   console.log(`🤖 [${modelIndex + 1}/${totalModels}] ${model} is reviewing...`)
@@ -22,10 +27,8 @@ export async function runModelReview(
   const startTime = Date.now()
   const allFindings: ReviewFinding[] = []
 
-  // Parse the PR diff into per-file chunks
   const { chunks } = parseDiff(pr.diffContent)
 
-  // Split large chunks to fit model context window
   const maxChars = config.review.maxTokensPerChunk * CHARS_PER_TOKEN
   const splitChunkList = splitChunks(chunks, maxChars)
 
@@ -33,7 +36,6 @@ export async function runModelReview(
     console.log('  ℹ️  No diff content to review.')
   }
 
-  // Review each chunk sequentially (one file / hunk at a time)
   for (let i = 0; i < splitChunkList.length; i++) {
     const chunk = splitChunkList[i]!
     console.log(`  📄 [${i + 1}/${splitChunkList.length}] ${chunk.filename}...`)
@@ -45,6 +47,10 @@ export async function runModelReview(
     }
 
     allFindings.push(...findings)
+
+    if (onChunkReviewed) {
+      await onChunkReviewed(model, chunk, findings, i, splitChunkList.length)
+    }
   }
 
   const durationMs = Date.now() - startTime
@@ -52,11 +58,5 @@ export async function runModelReview(
   console.log(`\n  📊 ${model} found ${allFindings.length} total finding(s)`)
   console.log(`  ⏱️  Took ${(durationMs / 1000).toFixed(1)}s`)
 
-  const result: ModelReviewResult = {
-    model,
-    findings: allFindings,
-    durationMs,
-  }
-
-  return result
+  return { model, findings: allFindings, durationMs }
 }

@@ -51,6 +51,28 @@ function parseFindings(raw: string, filename: string): ReviewFinding[] {
   }
 }
 
+export async function checkAvailableModels(models: string[]): Promise<{ available: string[]; missing: string[] }> {
+  const resp = await fetch(`${config.ollama.baseUrl}/api/tags`)
+  if (!resp.ok) {
+    throw new Error(`Cannot reach Ollama at ${config.ollama.baseUrl} — is it running?`)
+  }
+  const data = await resp.json() as { models: { name: string }[] }
+  const installed = new Set(data.models.map(m => m.name))
+
+  const available: string[] = []
+  const missing: string[] = []
+
+  for (const model of models) {
+    if (installed.has(model)) {
+      available.push(model)
+    } else {
+      missing.push(model)
+    }
+  }
+
+  return { available, missing }
+}
+
 export async function reviewChunk(
   model: string,
   chunk: DiffChunk,

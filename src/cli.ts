@@ -1,11 +1,13 @@
 import { fetchPR } from './github/fetcher.js'
-import { postModelReview, postCompletionComment } from './github/commenter.js'
+import { postFileReview, postModelSummary, postCompletionComment } from './github/commenter.js'
 import { parseDiff } from './github/diff-parser.js'
 import { getLocalDiff } from './source/local-diff.js'
 import { printConsoleReport } from './report/console.js'
+import { checkAvailableModels } from './llm/client.js'
 import { runModelReview } from './reviewer.js'
+import type { OnChunkReviewed } from './reviewer.js'
 import { config } from './config.js'
-import type { PRInfo, ModelReviewResult } from './types.js'
+import type { PRInfo, ModelReviewResult, DiffPositionMap } from './types.js'
 
 function printUsage(): void {
   console.log(`
@@ -51,12 +53,11 @@ function parsePrArgs(args: string[]): { owner: string; repo: string; prNumber: n
   return null
 }
 
-/** Each model reviews the whole diff, one at a time. */
-async function runAllModels(pr: PRInfo): Promise<ModelReviewResult[]> {
+async function runAllModels(pr: PRInfo, onChunkReviewed?: OnChunkReviewed): Promise<ModelReviewResult[]> {
   const results: ModelReviewResult[] = []
   for (let i = 0; i < config.models.length; i++) {
     const modelConfig = config.models[i]!
-    results.push(await runModelReview(modelConfig.name, pr, i, config.models.length))
+    results.push(await runModelReview(modelConfig.name, pr, i, config.models.length, onChunkReviewed))
   }
   return results
 }
@@ -70,7 +71,23 @@ async function main(): Promise<void> {
   }
 
   console.log(`\n🚀 AI Code Reviewer`)
-  console.log(`🤖 Models: ${config.models.map(m => m.name).join(' → ')}`)
+
+  // ── Check which models are available in Ollama ───────────────────
+  const { available, missing } = await checkAvailableModels(config.models.map(m => m.name))
+
+  if (missing.length > 0) {
+    console.log(`⚠️  Skipping models not found in Ollama: ${missing.join(', ')}`)
+    console.log(`   Pull them with: ${missing.map(m => `ollama pull ${m}`).join(' && ')}`)
+  }
+
+  if (available.length === 0) {
+    console.error('❌ No configured models are available in Ollama.')
+    console.error(`   Pull at least one: ${config.models.map(m => `ollama pull ${m.name}`).join(' && ')}`)
+    process.exit(1)
+  }
+
+  const activeModels = config.models.filter(m => available.includes(m.name))
+  console.log(`🤖 Models: ${activeModels.map(m => m.name).join(' → ')}`)
 
   // ── Local diff mode ──────────────────────────────────────────────
   if (args.includes('--local')) {
@@ -105,12 +122,16 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  const results = await runAllModels(pr)
-
-  // Post each model's review block, then the completion summary.
   const { positionMap } = parseDiff(pr.diffContent)
+
+  const onChunkReviewed: OnChunkReviewed = async (model, chunk, findings, chunkIndex, totalChunks) => {
+    await postFileReview(owner, repo, prNumber, model, findings, chunk.filename, chunkIndex, totalChunks, positionMap)
+  }
+
+  const results = await runAllModels(pr, onChunkReviewed)
+
   for (const result of results) {
-    await postModelReview(owner, repo, prNumber, result, positionMap)
+    await postModelSummary(owner, repo, prNumber, result)
   }
   await postCompletionComment(owner, repo, prNumber, results)
 

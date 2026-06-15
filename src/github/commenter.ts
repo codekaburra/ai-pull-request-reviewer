@@ -79,24 +79,35 @@ function formatSummaryComment(result: ModelReviewResult): string {
   return comment
 }
 
-export async function postModelReview(
+export async function postFileReview(
   owner: string,
   repo: string,
   prNumber: number,
-  result: ModelReviewResult,
-  positionMap: DiffPositionMap
+  model: string,
+  findings: ReviewFinding[],
+  filename: string,
+  chunkIndex: number,
+  totalChunks: number,
+  positionMap: DiffPositionMap,
 ): Promise<void> {
-  const octokit = new Octokit({ auth: getGithubToken() })
-  const { model, findings } = result
+  if (findings.length === 0) return
 
-  // Build inline comments — only for findings with a file + line in the diff
+  const octokit = new Octokit({ auth: getGithubToken() })
+
   const inlineComments: { path: string; position: number; body: string }[] = []
+  const orphanFindings: ReviewFinding[] = []
 
   for (const finding of findings) {
-    if (!finding.file || finding.line === null) continue
+    if (!finding.file || finding.line === null) {
+      orphanFindings.push(finding)
+      continue
+    }
 
     const position = getDiffPosition(positionMap, finding.file, finding.line)
-    if (position === null) continue   // line not in diff, skip inline
+    if (position === null) {
+      orphanFindings.push(finding)
+      continue
+    }
 
     inlineComments.push({
       path: finding.file,
@@ -105,19 +116,65 @@ export async function postModelReview(
     })
   }
 
-  // Post as a single review (atomic — one block per model in the PR timeline)
-  await octokit.pulls.createReview({
+  const progress = `[${chunkIndex + 1}/${totalChunks}]`
+
+  if (inlineComments.length > 0) {
+    let body = `🤖 **\`${model}\`** ${progress} — **\`${filename}\`** — ${findings.length} finding(s)`
+
+    if (orphanFindings.length > 0) {
+      body += `\n\n`
+      for (const f of orphanFindings) {
+        const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
+        const cat = CATEGORY_LABEL[f.category] ?? f.category
+        const loc = f.line ? ` (line ${f.line})` : ''
+        body += `${emoji} **[${cat}] ${f.title}**${loc}\n${f.body}\n\n`
+      }
+    }
+
+    await octokit.pulls.createReview({
+      owner,
+      repo,
+      pull_number: prNumber,
+      event: 'COMMENT',
+      body,
+      comments: inlineComments,
+    })
+  } else {
+    let body = `🤖 **\`${model}\`** ${progress} — **\`${filename}\`** — ${findings.length} finding(s)\n\n`
+    for (const f of findings) {
+      const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
+      const cat = CATEGORY_LABEL[f.category] ?? f.category
+      const loc = f.line ? ` (line ${f.line})` : ''
+      body += `${emoji} **[${cat}] ${f.title}**${loc}\n${f.body}\n\n`
+    }
+
+    await octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: prNumber,
+      body,
+    })
+  }
+
+  console.log(`  💬 ${model} posted ${findings.length} finding(s) for ${filename}`)
+}
+
+export async function postModelSummary(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  result: ModelReviewResult,
+): Promise<void> {
+  const octokit = new Octokit({ auth: getGithubToken() })
+
+  await octokit.issues.createComment({
     owner,
     repo,
-    pull_number: prNumber,
-    event: 'COMMENT',
+    issue_number: prNumber,
     body: formatSummaryComment(result),
-    comments: inlineComments,
   })
 
-  console.log(
-    `✅ ${model} posted ${inlineComments.length} inline comment(s) + summary`
-  )
+  console.log(`✅ ${result.model} summary posted`)
 }
 
 export async function postCompletionComment(
