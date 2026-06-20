@@ -43,6 +43,9 @@ const fakeResults: ModelReviewResult[] = [
   {
     model: 'phi4',
     durationMs: 1200,
+    status: 'completed',
+    chunksTotal: 2,
+    chunksCompleted: 2,
     findings: [
       {
         file: 'src/math.js', line: 2, severity: 'blocking', category: 'logic',
@@ -57,7 +60,23 @@ const fakeResults: ModelReviewResult[] = [
       },
     ],
   },
-  { model: 'qwen2.5-coder', durationMs: 1500, findings: [] },
+  {
+    model: 'mistral:7b',
+    durationMs: 1500,
+    status: 'completed',
+    chunksTotal: 2,
+    chunksCompleted: 2,
+    findings: [],
+  },
+  {
+    model: 'starcoder2:7b',
+    durationMs: 300000,
+    status: 'failed',
+    error: 'timed out after 300s',
+    chunksTotal: 2,
+    chunksCompleted: 0,
+    findings: [],
+  },
 ]
 
 let rendered = true

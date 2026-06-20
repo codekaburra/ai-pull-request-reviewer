@@ -77,30 +77,27 @@ export async function reviewChunk(
   model: string,
   chunk: DiffChunk,
   prTitle: string,
-  prDescription: string
+  prDescription: string,
+  timeoutMs: number,
 ): Promise<ReviewFinding[]> {
   const client = getClient()
 
   const userPrompt = buildReviewPrompt(prTitle, prDescription, chunk.filename, chunk.content)
 
-  try {
-    const response = await client.chat.completions.create({
+  const response = await client.chat.completions.create(
+    {
       model,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
-      temperature: 0.1,    // low temperature for consistent, focused output
-      // Ollama keep_alive: unload model from memory after response
+      temperature: 0.1,
       // @ts-expect-error — Ollama-specific extra param not in OpenAI types
       keep_alive: config.ollama.keepAlive,
-    })
+    },
+    { signal: AbortSignal.timeout(timeoutMs) },
+  )
 
-    const content = response.choices[0]?.message?.content ?? ''
-    return parseFindings(content, chunk.filename)
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.warn(`  ⚠️  ${model} failed on ${chunk.filename}: ${message}`)
-    return []
-  }
+  const content = response.choices[0]?.message?.content ?? ''
+  return parseFindings(content, chunk.filename)
 }

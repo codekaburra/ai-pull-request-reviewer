@@ -34,16 +34,28 @@ function formatInlineComment(finding: ReviewFinding, model: string): string {
 }
 
 function formatSummaryComment(result: ModelReviewResult): string {
-  const { model, findings, durationMs } = result
+  const { model, findings, durationMs, status, error, chunksTotal, chunksCompleted } = result
   const seconds = (durationMs / 1000).toFixed(1)
+
+  const statusIcon = status === 'completed' ? '🤖' : status === 'partial' ? '⚠️' : '❌'
+  let comment = `## ${statusIcon} Code Review by \`${model}\`\n\n`
+
+  if (status === 'failed') {
+    comment += `**Review failed:** ${error}\n\n`
+    comment += `No files were reviewed. This model may be unavailable or unresponsive.\n\n`
+    comment += `---\n⏱️ Failed after ${seconds}s`
+    return comment
+  }
+
+  if (status === 'partial') {
+    comment += `> ⚠️ **Partial review** — completed ${chunksCompleted}/${chunksTotal} chunks before failure: ${error}\n\n`
+  }
 
   const counts = {
     blocking:   findings.filter(f => f.severity === 'blocking').length,
     warning:    findings.filter(f => f.severity === 'warning').length,
     suggestion: findings.filter(f => f.severity === 'suggestion').length,
   }
-
-  let comment = `## 🤖 Code Review by \`${model}\`\n\n`
 
   if (findings.length === 0) {
     comment += `✅ No issues found. Looks good!\n\n`
@@ -55,7 +67,6 @@ function formatSummaryComment(result: ModelReviewResult): string {
     if (counts.suggestion > 0) comment += `| 🔵 Suggestion | ${counts.suggestion} |\n`
     comment += `\n`
 
-    // Group findings by file
     const byFile = new Map<string, ReviewFinding[]>()
     for (const f of findings) {
       const key = f.file ?? 'PR Level'
@@ -191,19 +202,32 @@ export async function postCompletionComment(
     0
   )
 
-  let body = `## ✅ Code Review Complete\n\n`
-  body += `All models have finished reviewing PR #${prNumber}.\n\n`
-  body += `| Model | 🔴 Blocking | 🟡 Warning | 🔵 Suggestion | Total |\n`
-  body += `|---|---|---|---|---|\n`
+  const allCompleted = results.every(r => r.status === 'completed')
+  const anyFailed = results.some(r => r.status === 'failed' || r.status === 'partial')
+
+  let body = allCompleted
+    ? `## ✅ Code Review Complete\n\n`
+    : `## ⚠️ Code Review Complete (with failures)\n\n`
+
+  body += `| Model | Status | 🔴 Blocking | 🟡 Warning | 🔵 Suggestion | Total |\n`
+  body += `|---|---|---|---|---|---|\n`
 
   for (const r of results) {
     const blocking   = r.findings.filter(f => f.severity === 'blocking').length
     const warning    = r.findings.filter(f => f.severity === 'warning').length
     const suggestion = r.findings.filter(f => f.severity === 'suggestion').length
-    body += `| 🤖 \`${r.model}\` | ${blocking} | ${warning} | ${suggestion} | ${r.findings.length} |\n`
+    const statusLabel = r.status === 'completed' ? '✅'
+      : r.status === 'partial' ? `⚠️ ${r.chunksCompleted}/${r.chunksTotal}`
+      : '❌ failed'
+    body += `| 🤖 \`${r.model}\` | ${statusLabel} | ${blocking} | ${warning} | ${suggestion} | ${r.findings.length} |\n`
   }
 
   body += `\n**${results.length} models reviewed this PR — ${totalFindings} total finding(s)**`
+
+  if (anyFailed) {
+    const failedModels = results.filter(r => r.status !== 'completed')
+    body += `\n\n> ⚠️ **${failedModels.length} model(s) did not complete:** ${failedModels.map(r => `\`${r.model}\` (${r.error})`).join(', ')}`
+  }
 
   if (totalBlocking > 0) {
     body += `\n\n> ⚠️ **${totalBlocking} blocking issue(s) found.** Please address before merging.`

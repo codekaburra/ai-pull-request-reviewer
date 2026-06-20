@@ -15,6 +15,10 @@ export interface ModelReviewResult {
   model: string
   findings: ReviewFinding[]
   durationMs: number
+  status: 'completed' | 'partial' | 'failed'
+  error?: string
+  chunksTotal: number
+  chunksCompleted: number
 }
 
 export interface PRInfo {

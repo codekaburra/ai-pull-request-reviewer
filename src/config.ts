@@ -16,6 +16,7 @@ export interface Config {
   models: ModelConfig[]
   review: {
     maxTokensPerChunk: number
+    timeoutMs: number
     skipPaths: string[]
   }
 }
@@ -32,6 +33,7 @@ export const config: Config = {
   ],
   review: {
     maxTokensPerChunk: 6000,
+    timeoutMs: 5 * 60 * 1000,  // 5 minutes per chunk
     skipPaths: [
       '*.lock',
       'package-lock.json',

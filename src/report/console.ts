@@ -32,16 +32,25 @@ function printFinding(f: ReviewFinding): void {
  */
 export function printConsoleReport(results: ModelReviewResult[]): void {
   for (const r of results) {
+    const statusIcon = r.status === 'completed' ? '🤖' : r.status === 'partial' ? '⚠️' : '❌'
     console.log(`\n${'─'.repeat(60)}`)
-    console.log(`🤖 ${r.model}`)
+    console.log(`${statusIcon} ${r.model}`)
     console.log(`${'─'.repeat(60)}`)
+
+    if (r.status === 'failed') {
+      console.log(`  ❌ Review failed: ${r.error}`)
+      continue
+    }
+
+    if (r.status === 'partial') {
+      console.log(`  ⚠️  Partial review (${r.chunksCompleted}/${r.chunksTotal} chunks): ${r.error}`)
+    }
 
     if (r.findings.length === 0) {
       console.log('  ✅ No issues found.')
       continue
     }
 
-    // Group by file so related findings read together.
     const byFile = new Map<string, ReviewFinding[]>()
     for (const f of r.findings) {
       const key = f.file || '(PR level)'
@@ -53,7 +62,6 @@ export function printConsoleReport(results: ModelReviewResult[]): void {
     }
   }
 
-  // Summary table across all models.
   console.log(`\n${'═'.repeat(60)}`)
   console.log('📊 Summary')
   console.log(`${'═'.repeat(60)}`)
@@ -61,8 +69,9 @@ export function printConsoleReport(results: ModelReviewResult[]): void {
     const blocking   = r.findings.filter(f => f.severity === 'blocking').length
     const warning    = r.findings.filter(f => f.severity === 'warning').length
     const suggestion = r.findings.filter(f => f.severity === 'suggestion').length
+    const status = r.status === 'completed' ? '' : r.status === 'partial' ? ' [PARTIAL]' : ' [FAILED]'
     console.log(
-      `  ${r.model.padEnd(24)} ${blocking} blocking · ${warning} warning · ${suggestion} suggestion`
+      `  ${r.model.padEnd(24)} ${blocking} blocking · ${warning} warning · ${suggestion} suggestion${status}`
     )
   }
   console.log('')
