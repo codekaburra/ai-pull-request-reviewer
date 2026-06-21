@@ -1,4 +1,4 @@
-import type { ModelReviewResult, ReviewFinding, CrossReviewResult } from '../types.js'
+import type { ModelReviewResult, ReviewFinding, CrossReviewResult, AggregatedReport, AggregatedFinding } from '../types.js'
 
 const SEVERITY_EMOJI: Record<string, string> = {
   blocking:   '🔴',
@@ -112,5 +112,46 @@ export function printCrossReviewReport(
       if (v.refinedSeverity) console.log(`       → refined severity: ${v.refinedSeverity}`)
     }
   }
+  console.log('')
+}
+
+const CONFIDENCE_ICON: Record<string, string> = {
+  high:   '🟢',
+  medium: '🟡',
+  low:    '⚪',
+}
+
+export function printAggregatedReport(report: AggregatedReport): void {
+  const { findings, stats, totalModels } = report
+
+  console.log(`\n${'═'.repeat(60)}`)
+  console.log(`📋 Aggregated Report (${totalModels} models)`)
+  console.log(`${'═'.repeat(60)}`)
+  console.log(`  ${stats.totalRaw} raw → ${stats.deduplicated} unique (${stats.filtered} duplicates merged)`)
+  console.log(`  ${stats.highConfidence} high-confidence findings\n`)
+
+  if (findings.length === 0) {
+    console.log('  ✅ No findings after aggregation.')
+    return
+  }
+
+  for (const f of findings) {
+    const sev = SEVERITY_EMOJI[f.severity] ?? '⚪'
+    const conf = CONFIDENCE_ICON[f.confidence] ?? '⚪'
+    const cat = CATEGORY_LABEL[f.category] ?? f.category
+    const loc = f.line ? `:${f.line}` : ''
+    const models = f.reportedBy.join(', ')
+    console.log(`  ${sev}${conf} [${cat}] ${f.file}${loc} — ${f.title}`)
+    console.log(`     reported: ${models} · score: ${f.score.toFixed(2)}`)
+    if (f.agreedBy.length > 0) console.log(`     ✅ agreed: ${f.agreedBy.join(', ')}`)
+    if (f.disagreedBy.length > 0) console.log(`     ❌ disagreed: ${f.disagreedBy.join(', ')}`)
+    if (f.refinedBy.length > 0) console.log(`     ✏️  refined: ${f.refinedBy.join(', ')}`)
+  }
+
+  console.log(`\n${'─'.repeat(60)}`)
+  const blocking = findings.filter(f => f.severity === 'blocking').length
+  const warning = findings.filter(f => f.severity === 'warning').length
+  const suggestion = findings.filter(f => f.severity === 'suggestion').length
+  console.log(`  Totals: ${blocking} blocking · ${warning} warning · ${suggestion} suggestion`)
   console.log('')
 }

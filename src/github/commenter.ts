@@ -1,7 +1,7 @@
 import { Octokit } from '@octokit/rest'
 import { getGithubToken } from './auth.js'
 import { getDiffPosition } from './diff-parser.js'
-import type { ReviewFinding, ModelReviewResult, CrossReviewResult } from '../types.js'
+import type { ReviewFinding, ModelReviewResult, CrossReviewResult, AggregatedReport } from '../types.js'
 import type { DiffPositionMap } from '../types.js'
 
 const SEVERITY_EMOJI: Record<string, string> = {
@@ -250,19 +250,20 @@ export async function postCrossReviewComment(
   console.log(`🔄 Cross-review comment posted`)
 }
 
+const CONFIDENCE_EMOJI: Record<string, string> = {
+  high:   '🟢',
+  medium: '🟡',
+  low:    '⚪',
+}
+
 export async function postCompletionComment(
   owner: string,
   repo: string,
   prNumber: number,
-  results: ModelReviewResult[]
+  results: ModelReviewResult[],
+  report?: AggregatedReport,
 ): Promise<void> {
   const octokit = new Octokit({ auth: getGithubToken() })
-
-  const totalFindings = results.reduce((sum, r) => sum + r.findings.length, 0)
-  const totalBlocking = results.reduce(
-    (sum, r) => sum + r.findings.filter(f => f.severity === 'blocking').length,
-    0
-  )
 
   const allCompleted = results.every(r => r.status === 'completed')
   const anyFailed = results.some(r => r.status === 'failed' || r.status === 'partial')
@@ -271,7 +272,9 @@ export async function postCompletionComment(
     ? `## ✅ Code Review Complete\n\n`
     : `## ⚠️ Code Review Complete (with failures)\n\n`
 
-  body += `| Model | Status | 🔴 Blocking | 🟡 Warning | 🔵 Suggestion | Total |\n`
+  // ── Model summary table ───────────────────────────────────────
+  body += `### Per-Model Results\n\n`
+  body += `| Model | Status | 🔴 | 🟡 | 🔵 | Total |\n`
   body += `|---|---|---|---|---|---|\n`
 
   for (const r of results) {
@@ -281,19 +284,41 @@ export async function postCompletionComment(
     const statusLabel = r.status === 'completed' ? '✅'
       : r.status === 'partial' ? `⚠️ ${r.chunksCompleted}/${r.chunksTotal}`
       : '❌ failed'
-    body += `| 🤖 \`${r.model}\` | ${statusLabel} | ${blocking} | ${warning} | ${suggestion} | ${r.findings.length} |\n`
+    body += `| \`${r.model}\` | ${statusLabel} | ${blocking} | ${warning} | ${suggestion} | ${r.findings.length} |\n`
   }
-
-  body += `\n**${results.length} models reviewed this PR — ${totalFindings} total finding(s)**`
 
   if (anyFailed) {
     const failedModels = results.filter(r => r.status !== 'completed')
-    body += `\n\n> ⚠️ **${failedModels.length} model(s) did not complete:** ${failedModels.map(r => `\`${r.model}\` (${r.error})`).join(', ')}`
+    body += `\n> ⚠️ **${failedModels.length} model(s) did not complete:** ${failedModels.map(r => `\`${r.model}\` (${r.error})`).join(', ')}\n`
   }
 
-  if (totalBlocking > 0) {
-    body += `\n\n> ⚠️ **${totalBlocking} blocking issue(s) found.** Please address before merging.`
+  // ── Aggregated findings ───────────────────────────────────────
+  if (report && report.findings.length > 0) {
+    const { stats } = report
+    body += `\n### 📋 Consolidated Findings\n\n`
+    body += `> ${stats.totalRaw} raw findings → **${stats.deduplicated} unique** (${stats.filtered} duplicates merged) · ${stats.highConfidence} high-confidence\n\n`
+
+    body += `| Conf. | Sev. | File | Line | Finding | Reported By | Score |\n`
+    body += `|---|---|---|---|---|---|---|\n`
+
+    for (const f of report.findings) {
+      const conf = CONFIDENCE_EMOJI[f.confidence] ?? '⚪'
+      const sev = SEVERITY_EMOJI[f.severity] ?? '⚪'
+      const line = f.line ?? '—'
+      const models = f.reportedBy.map(m => `\`${m}\``).join(', ')
+      const title = f.title.replace(/\|/g, '\\|')
+      body += `| ${conf} ${f.confidence} | ${sev} | \`${f.file}\` | ${line} | ${title} | ${models} | ${f.score.toFixed(2)} |\n`
+    }
+
+    const blocking = report.findings.filter(f => f.severity === 'blocking').length
+    if (blocking > 0) {
+      body += `\n> ⚠️ **${blocking} blocking issue(s) found.** Please address before merging.\n`
+    }
+  } else if (report) {
+    body += `\n### 📋 Consolidated Findings\n\n✅ No issues survived aggregation — all models agree the code looks good.\n`
   }
+
+  body += `\n---\n*Reviewed by ${results.length} model(s)*`
 
   await octokit.issues.createComment({
     owner,

@@ -69,3 +69,34 @@ export interface CrossReviewResult {
   status: 'completed' | 'failed'
   error?: string
 }
+
+// ── Stage 3: Aggregation ──────────────────────────────────────────
+
+export type Confidence = 'high' | 'medium' | 'low'
+
+export interface AggregatedFinding {
+  file: string
+  line: number | null
+  severity: Severity
+  category: Category
+  title: string
+  body: string
+  suggestedFix?: string
+  reportedBy: string[]
+  agreedBy: string[]
+  disagreedBy: string[]
+  refinedBy: string[]
+  confidence: Confidence
+  score: number            // 0.0–1.0 — higher = more agreement
+}
+
+export interface AggregatedReport {
+  findings: AggregatedFinding[]
+  totalModels: number
+  stats: {
+    totalRaw: number
+    deduplicated: number
+    highConfidence: number
+    filtered: number
+  }
+}

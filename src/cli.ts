@@ -3,14 +3,15 @@ import { postFileReview, postModelSummary, postCrossReviewComment, postCompletio
 import { parseDiff } from './github/diff-parser.js'
 import { getLocalDiff } from './source/local-diff.js'
 import { fetchRepoFiles } from './source/repo-scan.js'
-import { printConsoleReport, printCrossReviewReport } from './report/console.js'
+import { printConsoleReport, printCrossReviewReport, printAggregatedReport } from './report/console.js'
 import { checkAvailableModels, reviewFile } from './llm/client.js'
 import { runModelReview } from './reviewer.js'
 import type { OnChunkReviewed } from './reviewer.js'
 import { runCrossReview } from './crossReview.js'
+import { aggregate } from './aggregator.js'
 import { createIssuesFromFindings } from './github/issues.js'
 import { config } from './config.js'
-import type { PRInfo, ModelReviewResult, ReviewFinding } from './types.js'
+import type { PRInfo, ModelReviewResult, ReviewFinding, CrossReviewResult } from './types.js'
 
 function printUsage(): void {
   console.log(`
@@ -195,14 +196,18 @@ async function main(): Promise<void> {
     const results = await runAllModels(activeModels, pr)
     printConsoleReport(results)
 
+    let crossResults: CrossReviewResult[] = []
     if (activeModels.length > 1) {
-      const crossResults = await runCrossReview(
+      crossResults = await runCrossReview(
         activeModels.map(m => m.name),
         results,
         pr.diffContent,
       )
       printCrossReviewReport(results, crossResults)
     }
+
+    const report = aggregate(results, crossResults)
+    printAggregatedReport(report)
 
     process.exit(0)
   }
@@ -244,15 +249,19 @@ async function main(): Promise<void> {
     const results = await runRepoScan(activeModels, files, owner, repo)
     printConsoleReport(results)
 
+    let crossResults: CrossReviewResult[] = []
     if (activeModels.length > 1) {
       const allDiff = files.map(f => `--- a/${f.path}\n+++ b/${f.path}\n${f.content}`).join('\n\n')
-      const crossResults = await runCrossReview(
+      crossResults = await runCrossReview(
         activeModels.map(m => m.name),
         results,
         allDiff,
       )
       printCrossReviewReport(results, crossResults)
     }
+
+    const report = aggregate(results, crossResults)
+    printAggregatedReport(report)
 
     console.log('\n📋 Creating GitHub issues...')
     const created = await createIssuesFromFindings(owner, repo, results)
@@ -290,8 +299,9 @@ async function main(): Promise<void> {
     await postModelSummary(owner, repo, prNumber, result)
   }
 
+  let crossResults: CrossReviewResult[] = []
   if (activeModels.length > 1) {
-    const crossResults = await runCrossReview(
+    crossResults = await runCrossReview(
       activeModels.map(m => m.name),
       results,
       pr.diffContent,
@@ -299,7 +309,8 @@ async function main(): Promise<void> {
     await postCrossReviewComment(owner, repo, prNumber, results, crossResults)
   }
 
-  await postCompletionComment(owner, repo, prNumber, results)
+  const report = aggregate(results, crossResults)
+  await postCompletionComment(owner, repo, prNumber, results, report)
 
   console.log(`\n${'═'.repeat(50)}`)
   console.log(`✅ Code review complete!`)

@@ -9,7 +9,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { parseDiff, splitChunks, getDiffPosition } from '../src/github/diff-parser.js'
-import { printConsoleReport, printCrossReviewReport } from '../src/report/console.js'
+import { printConsoleReport, printCrossReviewReport, printAggregatedReport } from '../src/report/console.js'
+import { aggregate } from '../src/aggregator.js'
 import type { ModelReviewResult, CrossReviewResult } from '../src/types.js'
 
 let failures = 0
@@ -127,6 +128,46 @@ try {
   console.error(err)
 }
 check('printCrossReviewReport renders without throwing', crossRendered)
+
+console.log('\n── aggregate ──')
+
+// Add a duplicate finding from mistral that should merge with phi4's
+const resultsWithOverlap: ModelReviewResult[] = [
+  {
+    ...fakeResults[0]!,
+  },
+  {
+    model: 'mistral:7b',
+    durationMs: 1500,
+    status: 'completed',
+    chunksTotal: 2,
+    chunksCompleted: 2,
+    findings: [
+      {
+        file: 'src/math.js', line: 3, severity: 'blocking', category: 'logic',
+        title: 'add() subtracts instead of adding',
+        body: 'Function add uses subtraction operator.',
+      },
+    ],
+  },
+  fakeResults[2]!,
+]
+
+const report = aggregate(resultsWithOverlap, fakeCrossResults)
+check('deduplicates similar findings', report.stats.deduplicated < report.stats.totalRaw)
+check('merged finding has multiple reporters', report.findings.some(f => f.reportedBy.length > 1))
+check('tracks agreement from cross-review', report.findings.some(f => f.agreedBy.length > 0))
+check('calculates confidence scores', report.findings.every(f => f.score >= 0 && f.score <= 1))
+check('sorts high confidence first', report.findings[0]!.confidence === 'high' || report.findings.length <= 1)
+
+let aggRendered = true
+try {
+  printAggregatedReport(report)
+} catch (err) {
+  aggRendered = false
+  console.error(err)
+}
+check('printAggregatedReport renders without throwing', aggRendered)
 
 console.log(`\n${failures === 0 ? '✅ all checks passed' : `❌ ${failures} check(s) failed`}\n`)
 process.exit(failures === 0 ? 0 : 1)
