@@ -14,15 +14,14 @@ const CATEGORY_LABEL: Record<string, string> = {
   general:  'General',
 }
 
-function printFinding(f: ReviewFinding): void {
+function printFinding(f: ReviewFinding, verbose: boolean): void {
   const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
   const cat = CATEGORY_LABEL[f.category] ?? f.category
   const loc = f.line ? `:${f.line}` : ''
   console.log(`  ${emoji} [${cat}] ${f.file}${loc} — ${f.title}`)
-  if (f.body) console.log(`     ${f.body.replace(/\n/g, '\n     ')}`)
-  if (f.suggestedFix) {
-    console.log(`     ↳ suggested fix:`)
-    console.log(`       ${f.suggestedFix.replace(/\n/g, '\n       ')}`)
+  if (verbose && f.body) console.log(`     ${f.body.replace(/\n/g, '\n     ')}`)
+  if (verbose && f.suggestedFix) {
+    console.log(`     ↳ fix: ${f.suggestedFix.replace(/\n/g, '\n           ')}`)
   }
 }
 
@@ -51,14 +50,9 @@ export function printConsoleReport(results: ModelReviewResult[]): void {
       continue
     }
 
-    const byFile = new Map<string, ReviewFinding[]>()
+    const verbose = r.findings.length <= 10
     for (const f of r.findings) {
-      const key = f.file || '(PR level)'
-      if (!byFile.has(key)) byFile.set(key, [])
-      byFile.get(key)!.push(f)
-    }
-    for (const [, fileFindings] of byFile) {
-      for (const f of fileFindings) printFinding(f)
+      printFinding(f, verbose && f.severity !== 'suggestion')
     }
   }
 

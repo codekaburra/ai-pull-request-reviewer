@@ -18,6 +18,18 @@ const CATEGORY_LABEL: Record<string, string> = {
   general:  'General',
 }
 
+function formatFindingsTable(findings: ReviewFinding[]): string {
+  let table = `\n\n| | Line | Title | Detail |\n|---|---|---|---|\n`
+  for (const f of findings) {
+    const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
+    const cat = CATEGORY_LABEL[f.category] ?? f.category
+    const line = f.line ?? '—'
+    const detail = f.body.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+    table += `| ${emoji} ${cat} | ${line} | **${f.title}** | ${detail} |\n`
+  }
+  return table
+}
+
 function formatInlineComment(finding: ReviewFinding, model: string): string {
   const severityEmoji = SEVERITY_EMOJI[finding.severity] ?? '⚪'
   const categoryLabel = CATEGORY_LABEL[finding.category] ?? finding.category
@@ -133,13 +145,7 @@ export async function postFileReview(
     let body = `🤖 **\`${model}\`** ${progress} — **\`${filename}\`** — ${findings.length} finding(s)`
 
     if (orphanFindings.length > 0) {
-      body += `\n\n`
-      for (const f of orphanFindings) {
-        const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
-        const cat = CATEGORY_LABEL[f.category] ?? f.category
-        const loc = f.line ? ` (line ${f.line})` : ''
-        body += `${emoji} **[${cat}] ${f.title}**${loc}\n${f.body}\n\n`
-      }
+      body += formatFindingsTable(orphanFindings)
     }
 
     await octokit.pulls.createReview({
@@ -152,12 +158,7 @@ export async function postFileReview(
     })
   } else {
     let body = `🤖 **\`${model}\`** ${progress} — **\`${filename}\`** — ${findings.length} finding(s)\n\n`
-    for (const f of findings) {
-      const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
-      const cat = CATEGORY_LABEL[f.category] ?? f.category
-      const loc = f.line ? ` (line ${f.line})` : ''
-      body += `${emoji} **[${cat}] ${f.title}**${loc}\n${f.body}\n\n`
-    }
+    body += formatFindingsTable(findings)
 
     await octokit.issues.createComment({
       owner,

@@ -14,24 +14,86 @@ const SEVERITY_LABEL: Record<string, string> = {
   suggestion: 'suggestion',
 }
 
-function buildIssueBody(file: string, findings: { model: string; finding: ReviewFinding }[]): string {
-  let body = `## 🤖 AI Code Review Findings\n\n`
-  body += `**File:** \`${file}\`\n\n`
+interface GroupedFinding {
+  pattern: string
+  severity: string
+  category: string
+  locations: { file: string; line: number | null; model: string; body: string; suggestedFix?: string }[]
+}
 
-  for (const { model, finding } of findings) {
-    const emoji = SEVERITY_EMOJI[finding.severity] ?? '⚪'
-    const loc = finding.line ? ` (line ${finding.line})` : ''
-    body += `### ${emoji} ${finding.title}${loc}\n\n`
-    body += `**Model:** \`${model}\` · **Severity:** ${finding.severity} · **Category:** ${finding.category}\n\n`
-    body += `${finding.body}\n\n`
+function normalizeTitle(title: string): string {
+  return title
+    .replace(/`[^`]+`/g, '*')
+    .replace(/\b[A-Z][a-zA-Z]+(?:\.[a-zA-Z]+)+/g, '*')
+    .replace(/\b(line|row|col)\s*\d+/gi, '')
+    .trim()
+    .toLowerCase()
+}
 
-    if (finding.suggestedFix) {
-      body += `**Suggested fix:**\n\`\`\`\n${finding.suggestedFix}\n\`\`\`\n\n`
+function groupSimilarFindings(
+  allFindings: { model: string; finding: ReviewFinding }[],
+): GroupedFinding[] {
+  const groups = new Map<string, GroupedFinding>()
+
+  for (const { model, finding } of allFindings) {
+    const key = `${finding.severity}:${finding.category}:${normalizeTitle(finding.title)}`
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        pattern: finding.title,
+        severity: finding.severity,
+        category: finding.category,
+        locations: [],
+      })
     }
 
-    body += `---\n\n`
+    groups.get(key)!.locations.push({
+      file: finding.file,
+      line: finding.line,
+      model,
+      body: finding.body,
+      suggestedFix: finding.suggestedFix,
+    })
   }
 
+  return [...groups.values()].sort((a, b) => {
+    const order: Record<string, number> = { blocking: 0, warning: 1, suggestion: 2 }
+    return (order[a.severity] ?? 3) - (order[b.severity] ?? 3)
+  })
+}
+
+function buildGroupedIssueBody(group: GroupedFinding): string {
+  const emoji = SEVERITY_EMOJI[group.severity] ?? '⚪'
+  let body = `## ${emoji} ${group.pattern}\n\n`
+  body += `**Severity:** ${group.severity} · **Category:** ${group.category} · **Occurrences:** ${group.locations.length}\n\n`
+
+  body += `| File | Line | Model |\n|---|---|---|\n`
+  for (const loc of group.locations) {
+    const line = loc.line ?? '—'
+    body += `| \`${loc.file}\` | ${line} | \`${loc.model}\` |\n`
+  }
+  body += `\n`
+
+  const unique = new Map<string, string>()
+  for (const loc of group.locations) {
+    if (!unique.has(loc.body)) unique.set(loc.body, loc.model)
+  }
+  if (unique.size === 1) {
+    body += `### Detail\n${[...unique.keys()][0]}\n\n`
+  } else {
+    body += `### Details\n`
+    for (const [detail, model] of unique) {
+      body += `- **\`${model}\`:** ${detail}\n`
+    }
+    body += `\n`
+  }
+
+  const fix = group.locations.find(l => l.suggestedFix)
+  if (fix) {
+    body += `### Suggested fix\n\`\`\`\n${fix.suggestedFix}\n\`\`\`\n\n`
+  }
+
+  body += `---\n*Found by AI code review*`
   return body
 }
 
@@ -55,23 +117,20 @@ export async function createIssuesFromFindings(
     return 0
   }
 
-  const byFile = new Map<string, { model: string; finding: ReviewFinding }[]>()
-  for (const f of allFindings) {
-    const key = f.finding.file || '(repo level)'
-    if (!byFile.has(key)) byFile.set(key, [])
-    byFile.get(key)!.push(f)
-  }
+  const groups = groupSimilarFindings(allFindings)
+  console.log(`  📊 ${allFindings.length} findings consolidated into ${groups.length} issue(s)`)
 
   let created = 0
 
-  for (const [file, findings] of byFile) {
-    const maxSeverity = findings.some(f => f.finding.severity === 'blocking') ? 'blocking'
-      : findings.some(f => f.finding.severity === 'warning') ? 'warning'
-      : 'suggestion'
+  for (const group of groups) {
+    const emoji = SEVERITY_EMOJI[group.severity] ?? '⚪'
+    const fileCount = new Set(group.locations.map(l => l.file)).size
+    const suffix = group.locations.length > 1
+      ? ` (${group.locations.length}× across ${fileCount} file${fileCount > 1 ? 's' : ''})`
+      : ''
 
-    const title = `[AI Review] ${SEVERITY_EMOJI[maxSeverity]} ${file} — ${findings.length} finding(s)`
-
-    const labels: string[] = [`ai-review`, `severity:${SEVERITY_LABEL[maxSeverity] ?? 'unknown'}`]
+    const title = `[AI Review] ${emoji} ${group.pattern}${suffix}`
+    const labels: string[] = [`ai-review`, `severity:${SEVERITY_LABEL[group.severity] ?? 'unknown'}`]
 
     try {
       for (const label of labels) {
@@ -84,7 +143,7 @@ export async function createIssuesFromFindings(
         owner,
         repo,
         title,
-        body: buildIssueBody(file, findings),
+        body: buildGroupedIssueBody(group),
         labels,
       })
 
@@ -92,7 +151,7 @@ export async function createIssuesFromFindings(
       created++
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      console.error(`  ❌ Failed to create issue for ${file}: ${message}`)
+      console.error(`  ❌ Failed to create issue: ${message}`)
     }
   }
 
