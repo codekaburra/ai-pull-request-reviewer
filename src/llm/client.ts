@@ -1,6 +1,6 @@
 import OpenAI from 'openai'
 import { config } from '../config.js'
-import { SYSTEM_PROMPT, buildReviewPrompt } from './prompts.js'
+import { SYSTEM_PROMPT, buildReviewPrompt, FILE_REVIEW_SYSTEM_PROMPT, buildFileReviewPrompt } from './prompts.js'
 import type { ReviewFinding, DiffChunk } from '../types.js'
 
 let cachedClient: OpenAI | null = null
@@ -96,6 +96,21 @@ export async function chatCompletion(
   )
 
   return response.choices[0]?.message?.content ?? ''
+}
+
+export async function reviewFile(
+  model: string,
+  filename: string,
+  content: string,
+  timeoutMs: number,
+): Promise<ReviewFinding[]> {
+  const raw = await chatCompletion(
+    model,
+    FILE_REVIEW_SYSTEM_PROMPT,
+    buildFileReviewPrompt(filename, content),
+    timeoutMs,
+  )
+  return parseFindings(raw, filename)
 }
 
 export async function reviewChunk(

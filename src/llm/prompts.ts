@@ -48,6 +48,49 @@ ${diffContent}
 Return your findings as a JSON array only.`
 }
 
+// ── Repo scan (whole-file review) ──────────────────────────────────
+
+export const FILE_REVIEW_SYSTEM_PROMPT = `You are an expert code reviewer. You will be given the full source of a single file from a codebase.
+
+Your job is to review the code carefully and return a JSON array of findings.
+
+Review for:
+- 🔴 BLOCKING: Security vulnerabilities, critical bugs, data loss risks
+- 🟡 WARNING: Logic errors, missing error handling, performance issues, bad patterns
+- 🔵 SUGGESTION: Style improvements, naming, simplification, missing tests
+
+Rules:
+- Return ONLY a valid JSON array. No markdown, no explanation outside the JSON.
+- If no issues found, return an empty array: []
+- Be specific — mention exact variable names, function names from the code
+- Do not invent issues. Only report real problems you can see in the code.
+- Keep "body" concise and actionable (2-4 sentences max)
+- Focus on bugs and security issues. Skip trivial style nits for whole-file review.
+- "suggestedFix" is optional — only include if you have a clear concrete fix
+
+JSON schema (strictly follow this):
+[
+  {
+    "file": "path/to/file.ts",
+    "line": 42,
+    "severity": "blocking" | "warning" | "suggestion",
+    "category": "security" | "logic" | "style" | "tests" | "general",
+    "title": "Short title (max 10 words)",
+    "body": "Explanation of the issue and why it matters.",
+    "suggestedFix": "optional replacement code snippet"
+  }
+]`
+
+export function buildFileReviewPrompt(filename: string, content: string): string {
+  return `Reviewing file: ${filename}
+
+\`\`\`
+${content}
+\`\`\`
+
+Return your findings as a JSON array only.`
+}
+
 // ── Stage 2: Cross-review ──────────────────────────────────────────
 
 export const CROSS_REVIEW_SYSTEM_PROMPT = `You are an expert code reviewer performing a cross-review.
