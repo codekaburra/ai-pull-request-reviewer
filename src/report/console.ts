@@ -1,4 +1,4 @@
-import type { ModelReviewResult, ReviewFinding } from '../types.js'
+import type { ModelReviewResult, ReviewFinding, CrossReviewResult } from '../types.js'
 
 const SEVERITY_EMOJI: Record<string, string> = {
   blocking:   '🔴',
@@ -73,6 +73,50 @@ export function printConsoleReport(results: ModelReviewResult[]): void {
     console.log(
       `  ${r.model.padEnd(24)} ${blocking} blocking · ${warning} warning · ${suggestion} suggestion${status}`
     )
+  }
+  console.log('')
+}
+
+const VERDICT_EMOJI: Record<string, string> = {
+  agree:    '✅',
+  disagree: '❌',
+  refine:   '✏️',
+}
+
+export function printCrossReviewReport(
+  stage1Results: ModelReviewResult[],
+  crossResults: CrossReviewResult[],
+): void {
+  if (crossResults.length === 0) return
+
+  const allFindings: { model: string; finding: ReviewFinding }[] = []
+  for (const r of stage1Results) {
+    if (r.status === 'failed') continue
+    for (const f of r.findings) {
+      allFindings.push({ model: r.model, finding: f })
+    }
+  }
+
+  console.log(`\n${'═'.repeat(60)}`)
+  console.log('🔄 Cross-Review Results')
+  console.log(`${'═'.repeat(60)}`)
+
+  for (const cr of crossResults) {
+    console.log(`\n  🤖 ${cr.reviewerModel}${cr.status === 'failed' ? ` ❌ ${cr.error}` : ''}`)
+
+    if (cr.status === 'failed') continue
+
+    for (const v of cr.verdicts) {
+      const f = allFindings[v.findingIndex]
+      if (!f) continue
+
+      const emoji = VERDICT_EMOJI[v.verdict] ?? '❓'
+      const loc = f.finding.line ? `:${f.finding.line}` : ''
+      console.log(`    ${emoji} #${v.findingIndex} (${v.originalModel}) ${f.finding.file}${loc} — ${f.finding.title}`)
+      if (v.rationale) console.log(`       ${v.rationale}`)
+      if (v.refinedTitle) console.log(`       → refined title: ${v.refinedTitle}`)
+      if (v.refinedSeverity) console.log(`       → refined severity: ${v.refinedSeverity}`)
+    }
   }
   console.log('')
 }

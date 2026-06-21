@@ -73,6 +73,31 @@ export async function checkAvailableModels(models: string[]): Promise<{ availabl
   return { available, missing }
 }
 
+export async function chatCompletion(
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  timeoutMs: number,
+): Promise<string> {
+  const client = getClient()
+
+  const response = await client.chat.completions.create(
+    {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.1,
+      // @ts-expect-error — Ollama-specific extra param not in OpenAI types
+      keep_alive: config.ollama.keepAlive,
+    },
+    { signal: AbortSignal.timeout(timeoutMs) },
+  )
+
+  return response.choices[0]?.message?.content ?? ''
+}
+
 export async function reviewChunk(
   model: string,
   chunk: DiffChunk,

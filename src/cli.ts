@@ -1,11 +1,12 @@
 import { fetchPR } from './github/fetcher.js'
-import { postFileReview, postModelSummary, postCompletionComment } from './github/commenter.js'
+import { postFileReview, postModelSummary, postCrossReviewComment, postCompletionComment } from './github/commenter.js'
 import { parseDiff } from './github/diff-parser.js'
 import { getLocalDiff } from './source/local-diff.js'
-import { printConsoleReport } from './report/console.js'
+import { printConsoleReport, printCrossReviewReport } from './report/console.js'
 import { checkAvailableModels } from './llm/client.js'
 import { runModelReview } from './reviewer.js'
 import type { OnChunkReviewed } from './reviewer.js'
+import { runCrossReview } from './crossReview.js'
 import { config } from './config.js'
 import type { PRInfo, ModelReviewResult } from './types.js'
 
@@ -105,6 +106,16 @@ async function main(): Promise<void> {
 
     const results = await runAllModels(activeModels, pr)
     printConsoleReport(results)
+
+    if (activeModels.length > 1) {
+      const crossResults = await runCrossReview(
+        activeModels.map(m => m.name),
+        results,
+        pr.diffContent,
+      )
+      printCrossReviewReport(results, crossResults)
+    }
+
     process.exit(0)
   }
 
@@ -136,6 +147,16 @@ async function main(): Promise<void> {
   for (const result of results) {
     await postModelSummary(owner, repo, prNumber, result)
   }
+
+  if (activeModels.length > 1) {
+    const crossResults = await runCrossReview(
+      activeModels.map(m => m.name),
+      results,
+      pr.diffContent,
+    )
+    await postCrossReviewComment(owner, repo, prNumber, results, crossResults)
+  }
+
   await postCompletionComment(owner, repo, prNumber, results)
 
   console.log(`\n${'═'.repeat(50)}`)

@@ -9,8 +9,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { parseDiff, splitChunks, getDiffPosition } from '../src/github/diff-parser.js'
-import { printConsoleReport } from '../src/report/console.js'
-import type { ModelReviewResult } from '../src/types.js'
+import { printConsoleReport, printCrossReviewReport } from '../src/report/console.js'
+import type { ModelReviewResult, CrossReviewResult } from '../src/types.js'
 
 let failures = 0
 function check(name: string, cond: boolean): void {
@@ -87,6 +87,46 @@ try {
   console.error(err)
 }
 check('printConsoleReport renders without throwing', rendered)
+
+console.log('\n── printCrossReviewReport ──')
+const fakeCrossResults: CrossReviewResult[] = [
+  {
+    reviewerModel: 'mistral:7b',
+    durationMs: 800,
+    status: 'completed',
+    verdicts: [
+      {
+        findingIndex: 0,
+        originalModel: 'phi4',
+        verdict: 'agree',
+        rationale: 'The function name says add but the body returns a - b.',
+      },
+      {
+        findingIndex: 1,
+        originalModel: 'phi4',
+        verdict: 'refine',
+        rationale: 'Valid concern but should be blocking, not warning.',
+        refinedSeverity: 'blocking',
+      },
+    ],
+  },
+  {
+    reviewerModel: 'starcoder2:7b',
+    durationMs: 300000,
+    status: 'failed',
+    error: 'timed out after 300s',
+    verdicts: [],
+  },
+]
+
+let crossRendered = true
+try {
+  printCrossReviewReport(fakeResults, fakeCrossResults)
+} catch (err) {
+  crossRendered = false
+  console.error(err)
+}
+check('printCrossReviewReport renders without throwing', crossRendered)
 
 console.log(`\n${failures === 0 ? '✅ all checks passed' : `❌ ${failures} check(s) failed`}\n`)
 process.exit(failures === 0 ? 0 : 1)

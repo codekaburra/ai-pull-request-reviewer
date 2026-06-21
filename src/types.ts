@@ -48,3 +48,24 @@ export interface DiffChunk {
 // Maps filename -> (line number -> diff position)
 // GitHub inline comments need position (offset in diff), not raw line number
 export type DiffPositionMap = Map<string, Map<number, number>>
+
+// ── Stage 2: Cross-review ──────────────────────────────────────────
+
+export type Verdict = 'agree' | 'disagree' | 'refine'
+
+export interface CrossReviewVerdict {
+  findingIndex: number
+  originalModel: string
+  verdict: Verdict
+  rationale: string
+  refinedTitle?: string
+  refinedSeverity?: Severity
+}
+
+export interface CrossReviewResult {
+  reviewerModel: string
+  verdicts: CrossReviewVerdict[]
+  durationMs: number
+  status: 'completed' | 'failed'
+  error?: string
+}

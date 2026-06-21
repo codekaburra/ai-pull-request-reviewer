@@ -1,7 +1,7 @@
 import { Octokit } from '@octokit/rest'
 import { getGithubToken } from './auth.js'
 import { getDiffPosition } from './diff-parser.js'
-import type { ReviewFinding, ModelReviewResult } from '../types.js'
+import type { ReviewFinding, ModelReviewResult, CrossReviewResult } from '../types.js'
 import type { DiffPositionMap } from '../types.js'
 
 const SEVERITY_EMOJI: Record<string, string> = {
@@ -186,6 +186,67 @@ export async function postModelSummary(
   })
 
   console.log(`✅ ${result.model} summary posted`)
+}
+
+export async function postCrossReviewComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  stage1Results: ModelReviewResult[],
+  crossResults: CrossReviewResult[],
+): Promise<void> {
+  if (crossResults.length === 0) return
+
+  const octokit = new Octokit({ auth: getGithubToken() })
+
+  const allFindings: { model: string; finding: ReviewFinding }[] = []
+  for (const r of stage1Results) {
+    if (r.status === 'failed') continue
+    for (const f of r.findings) {
+      allFindings.push({ model: r.model, finding: f })
+    }
+  }
+
+  let body = `## 🔄 Cross-Review Results\n\n`
+  body += `Each model evaluated the other models' findings.\n\n`
+
+  for (const cr of crossResults) {
+    if (cr.status === 'failed') {
+      body += `### ❌ \`${cr.reviewerModel}\` — failed\n${cr.error}\n\n`
+      continue
+    }
+
+    const agrees = cr.verdicts.filter(v => v.verdict === 'agree').length
+    const disagrees = cr.verdicts.filter(v => v.verdict === 'disagree').length
+    const refines = cr.verdicts.filter(v => v.verdict === 'refine').length
+
+    body += `### 🤖 \`${cr.reviewerModel}\` — ✅ ${agrees} agree · ❌ ${disagrees} disagree · ✏️ ${refines} refine\n\n`
+
+    if (cr.verdicts.length > 0) {
+      body += `| # | Original Model | Finding | Verdict | Rationale |\n`
+      body += `|---|---|---|---|---|\n`
+
+      for (const v of cr.verdicts) {
+        const f = allFindings[v.findingIndex]
+        const title = f ? f.finding.title : `(finding #${v.findingIndex})`
+        const verdictEmoji = v.verdict === 'agree' ? '✅' : v.verdict === 'disagree' ? '❌' : '✏️'
+        const rationale = v.rationale.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+        body += `| ${v.findingIndex} | \`${v.originalModel}\` | ${title} | ${verdictEmoji} ${v.verdict} | ${rationale} |\n`
+      }
+      body += `\n`
+    }
+  }
+
+  body += `---\n⏱️ Cross-review completed`
+
+  await octokit.issues.createComment({
+    owner,
+    repo,
+    issue_number: prNumber,
+    body,
+  })
+
+  console.log(`🔄 Cross-review comment posted`)
 }
 
 export async function postCompletionComment(
