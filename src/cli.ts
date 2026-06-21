@@ -1,11 +1,16 @@
 import { fetchPR } from './github/fetcher.js'
-import { postModelReview, postCompletionComment } from './github/commenter.js'
+import { postFileReview, postModelSummary, postCrossReviewComment, postCompletionComment } from './github/commenter.js'
 import { parseDiff } from './github/diff-parser.js'
 import { getLocalDiff } from './source/local-diff.js'
-import { printConsoleReport } from './report/console.js'
+import { fetchRepoFiles } from './source/repo-scan.js'
+import { printConsoleReport, printCrossReviewReport } from './report/console.js'
+import { checkAvailableModels, reviewFile } from './llm/client.js'
 import { runModelReview } from './reviewer.js'
+import type { OnChunkReviewed } from './reviewer.js'
+import { runCrossReview } from './crossReview.js'
+import { createIssuesFromFindings } from './github/issues.js'
 import { config } from './config.js'
-import type { PRInfo, ModelReviewResult } from './types.js'
+import type { PRInfo, ModelReviewResult, ReviewFinding } from './types.js'
 
 function printUsage(): void {
   console.log(`
@@ -19,11 +24,16 @@ Usage:
     npm run review -- owner/repo#123
     npm run review -- owner/repo 123
 
+  Repo scan (review entire repo & create GitHub issues):
+    npm run review -- --scan owner/repo --branch main
+    npm run review -- --scan https://github.com/owner/repo --branch feat/xyz
+
 Examples:
   npm run review -- --local
   npm run review -- --local main
   npm run review -- https://github.com/facebook/react/pull/1234
   npm run review -- facebook/react#1234
+  npm run review -- --scan myorg/myrepo --branch main
 `)
 }
 
@@ -51,12 +61,95 @@ function parsePrArgs(args: string[]): { owner: string; repo: string; prNumber: n
   return null
 }
 
-/** Each model reviews the whole diff, one at a time. */
-async function runAllModels(pr: PRInfo): Promise<ModelReviewResult[]> {
+function parseScanTarget(target: string): { owner: string; repo: string } | null {
+  const urlMatch = target.match(/github\.com\/([^/]+)\/([^/\s]+)/)
+  if (urlMatch) {
+    return { owner: urlMatch[1]!, repo: urlMatch[2]!.replace(/\.git$/, '') }
+  }
+
+  const slashMatch = target.match(/^([^/]+)\/([^/\s]+)$/)
+  if (slashMatch) {
+    return { owner: slashMatch[1]!, repo: slashMatch[2]!.replace(/\.git$/, '') }
+  }
+
+  return null
+}
+
+async function runRepoScan(
+  models: { name: string }[],
+  files: { path: string; content: string }[],
+  owner: string,
+  repo: string,
+): Promise<ModelReviewResult[]> {
   const results: ModelReviewResult[] = []
-  for (let i = 0; i < config.models.length; i++) {
-    const modelConfig = config.models[i]!
-    results.push(await runModelReview(modelConfig.name, pr, i, config.models.length))
+
+  for (let mi = 0; mi < models.length; mi++) {
+    const model = models[mi]!.name
+    console.log(`\n${'─'.repeat(50)}`)
+    console.log(`🤖 [${mi + 1}/${models.length}] ${model} scanning repo...`)
+    console.log(`${'─'.repeat(50)}`)
+
+    const startTime = Date.now()
+    const allFindings: ReviewFinding[] = []
+    let filesCompleted = 0
+    let lastError: string | undefined
+
+    for (let fi = 0; fi < files.length; fi++) {
+      const file = files[fi]!
+      console.log(`  📄 [${fi + 1}/${files.length}] ${file.path}...`)
+
+      try {
+        const findings = await reviewFile(model, file.path, file.content, config.review.timeoutMs)
+        if (findings.length > 0) {
+          console.log(`     → ${findings.length} finding(s)`)
+        }
+        allFindings.push(...findings)
+        filesCompleted++
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        const isTimeout = err instanceof DOMException && err.name === 'TimeoutError'
+        const label = isTimeout
+          ? `timed out after ${(config.review.timeoutMs / 1000).toFixed(0)}s`
+          : `failed: ${message}`
+        console.error(`  ❌ ${model} ${label} on ${file.path}`)
+        lastError = label
+        break
+      }
+    }
+
+    const durationMs = Date.now() - startTime
+    const status = filesCompleted === files.length
+      ? 'completed'
+      : filesCompleted > 0
+        ? 'partial'
+        : 'failed'
+
+    const statusIcon = status === 'completed' ? '📊' : status === 'partial' ? '⚠️' : '❌'
+    console.log(`\n  ${statusIcon} ${model}: ${status} (${filesCompleted}/${files.length} files, ${allFindings.length} finding(s))`)
+    console.log(`  ⏱️  Took ${(durationMs / 1000).toFixed(1)}s`)
+
+    results.push({
+      model,
+      findings: allFindings,
+      durationMs,
+      status,
+      error: lastError,
+      chunksTotal: files.length,
+      chunksCompleted: filesCompleted,
+    })
+  }
+
+  return results
+}
+
+async function runAllModels(
+  models: { name: string }[],
+  pr: PRInfo,
+  onChunkReviewed?: OnChunkReviewed,
+): Promise<ModelReviewResult[]> {
+  const results: ModelReviewResult[] = []
+  for (let i = 0; i < models.length; i++) {
+    results.push(await runModelReview(models[i]!.name, pr, i, models.length, onChunkReviewed))
   }
   return results
 }
@@ -70,7 +163,23 @@ async function main(): Promise<void> {
   }
 
   console.log(`\n🚀 AI Code Reviewer`)
-  console.log(`🤖 Models: ${config.models.map(m => m.name).join(' → ')}`)
+
+  // ── Check which models are available in Ollama ───────────────────
+  const { available, missing } = await checkAvailableModels(config.models.map(m => m.name))
+
+  if (missing.length > 0) {
+    console.log(`⚠️  Skipping models not found in Ollama: ${missing.join(', ')}`)
+    console.log(`   Pull them with: ${missing.map(m => `ollama pull ${m}`).join(' && ')}`)
+  }
+
+  if (available.length === 0) {
+    console.error('❌ No configured models are available in Ollama.')
+    console.error(`   Pull at least one: ${config.models.map(m => `ollama pull ${m.name}`).join(' && ')}`)
+    process.exit(1)
+  }
+
+  const activeModels = config.models.filter(m => available.includes(m.name))
+  console.log(`🤖 Models: ${activeModels.map(m => m.name).join(' → ')}`)
 
   // ── Local diff mode ──────────────────────────────────────────────
   if (args.includes('--local')) {
@@ -83,8 +192,72 @@ async function main(): Promise<void> {
       process.exit(0)
     }
 
-    const results = await runAllModels(pr)
+    const results = await runAllModels(activeModels, pr)
     printConsoleReport(results)
+
+    if (activeModels.length > 1) {
+      const crossResults = await runCrossReview(
+        activeModels.map(m => m.name),
+        results,
+        pr.diffContent,
+      )
+      printCrossReviewReport(results, crossResults)
+    }
+
+    process.exit(0)
+  }
+
+  // ── Repo scan mode ──────────────────────────────────────────────
+  if (args.includes('--scan')) {
+    const scanIdx = args.indexOf('--scan')
+    const scanTarget = args[scanIdx + 1]
+    if (!scanTarget) {
+      console.error('❌ --scan requires a repo (owner/repo or GitHub URL).')
+      printUsage()
+      process.exit(1)
+    }
+
+    const branchIdx = args.indexOf('--branch')
+    const branch = branchIdx !== -1 ? args[branchIdx + 1] : undefined
+    if (!branch) {
+      console.error('❌ --scan requires --branch <branch-name>.')
+      printUsage()
+      process.exit(1)
+    }
+
+    const scanParsed = parseScanTarget(scanTarget)
+    if (!scanParsed) {
+      console.error('❌ Invalid scan target. Use owner/repo or a GitHub URL.')
+      printUsage()
+      process.exit(1)
+    }
+
+    const { owner, repo } = scanParsed
+    console.log(`📌 Scanning: ${owner}/${repo} @ ${branch}`)
+
+    const files = await fetchRepoFiles(owner, repo, branch)
+    if (files.length === 0) {
+      console.log('\n✅ No reviewable files found.')
+      process.exit(0)
+    }
+
+    const results = await runRepoScan(activeModels, files, owner, repo)
+    printConsoleReport(results)
+
+    if (activeModels.length > 1) {
+      const allDiff = files.map(f => `--- a/${f.path}\n+++ b/${f.path}\n${f.content}`).join('\n\n')
+      const crossResults = await runCrossReview(
+        activeModels.map(m => m.name),
+        results,
+        allDiff,
+      )
+      printCrossReviewReport(results, crossResults)
+    }
+
+    console.log('\n📋 Creating GitHub issues...')
+    const created = await createIssuesFromFindings(owner, repo, results)
+    console.log(`\n✅ Scan complete — ${created} issue(s) created on ${owner}/${repo}`)
+
     process.exit(0)
   }
 
@@ -105,13 +278,27 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  const results = await runAllModels(pr)
-
-  // Post each model's review block, then the completion summary.
   const { positionMap } = parseDiff(pr.diffContent)
-  for (const result of results) {
-    await postModelReview(owner, repo, prNumber, result, positionMap)
+
+  const onChunkReviewed: OnChunkReviewed = async (model, chunk, findings, chunkIndex, totalChunks) => {
+    await postFileReview(owner, repo, prNumber, model, findings, chunk.filename, chunkIndex, totalChunks, positionMap)
   }
+
+  const results = await runAllModels(activeModels, pr, onChunkReviewed)
+
+  for (const result of results) {
+    await postModelSummary(owner, repo, prNumber, result)
+  }
+
+  if (activeModels.length > 1) {
+    const crossResults = await runCrossReview(
+      activeModels.map(m => m.name),
+      results,
+      pr.diffContent,
+    )
+    await postCrossReviewComment(owner, repo, prNumber, results, crossResults)
+  }
+
   await postCompletionComment(owner, repo, prNumber, results)
 
   console.log(`\n${'═'.repeat(50)}`)

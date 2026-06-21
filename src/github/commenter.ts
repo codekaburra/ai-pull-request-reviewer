@@ -1,7 +1,7 @@
 import { Octokit } from '@octokit/rest'
 import { getGithubToken } from './auth.js'
 import { getDiffPosition } from './diff-parser.js'
-import type { ReviewFinding, ModelReviewResult } from '../types.js'
+import type { ReviewFinding, ModelReviewResult, CrossReviewResult } from '../types.js'
 import type { DiffPositionMap } from '../types.js'
 
 const SEVERITY_EMOJI: Record<string, string> = {
@@ -16,6 +16,18 @@ const CATEGORY_LABEL: Record<string, string> = {
   style:    'Style',
   tests:    'Tests',
   general:  'General',
+}
+
+function formatFindingsTable(findings: ReviewFinding[]): string {
+  let table = `\n\n| | Line | Title | Detail |\n|---|---|---|---|\n`
+  for (const f of findings) {
+    const emoji = SEVERITY_EMOJI[f.severity] ?? '⚪'
+    const cat = CATEGORY_LABEL[f.category] ?? f.category
+    const line = f.line ?? '—'
+    const detail = f.body.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+    table += `| ${emoji} ${cat} | ${line} | **${f.title}** | ${detail} |\n`
+  }
+  return table
 }
 
 function formatInlineComment(finding: ReviewFinding, model: string): string {
@@ -34,16 +46,28 @@ function formatInlineComment(finding: ReviewFinding, model: string): string {
 }
 
 function formatSummaryComment(result: ModelReviewResult): string {
-  const { model, findings, durationMs } = result
+  const { model, findings, durationMs, status, error, chunksTotal, chunksCompleted } = result
   const seconds = (durationMs / 1000).toFixed(1)
+
+  const statusIcon = status === 'completed' ? '🤖' : status === 'partial' ? '⚠️' : '❌'
+  let comment = `## ${statusIcon} Code Review by \`${model}\`\n\n`
+
+  if (status === 'failed') {
+    comment += `**Review failed:** ${error}\n\n`
+    comment += `No files were reviewed. This model may be unavailable or unresponsive.\n\n`
+    comment += `---\n⏱️ Failed after ${seconds}s`
+    return comment
+  }
+
+  if (status === 'partial') {
+    comment += `> ⚠️ **Partial review** — completed ${chunksCompleted}/${chunksTotal} chunks before failure: ${error}\n\n`
+  }
 
   const counts = {
     blocking:   findings.filter(f => f.severity === 'blocking').length,
     warning:    findings.filter(f => f.severity === 'warning').length,
     suggestion: findings.filter(f => f.severity === 'suggestion').length,
   }
-
-  let comment = `## 🤖 Code Review by \`${model}\`\n\n`
 
   if (findings.length === 0) {
     comment += `✅ No issues found. Looks good!\n\n`
@@ -55,7 +79,6 @@ function formatSummaryComment(result: ModelReviewResult): string {
     if (counts.suggestion > 0) comment += `| 🔵 Suggestion | ${counts.suggestion} |\n`
     comment += `\n`
 
-    // Group findings by file
     const byFile = new Map<string, ReviewFinding[]>()
     for (const f of findings) {
       const key = f.file ?? 'PR Level'
@@ -79,24 +102,35 @@ function formatSummaryComment(result: ModelReviewResult): string {
   return comment
 }
 
-export async function postModelReview(
+export async function postFileReview(
   owner: string,
   repo: string,
   prNumber: number,
-  result: ModelReviewResult,
-  positionMap: DiffPositionMap
+  model: string,
+  findings: ReviewFinding[],
+  filename: string,
+  chunkIndex: number,
+  totalChunks: number,
+  positionMap: DiffPositionMap,
 ): Promise<void> {
-  const octokit = new Octokit({ auth: getGithubToken() })
-  const { model, findings } = result
+  if (findings.length === 0) return
 
-  // Build inline comments — only for findings with a file + line in the diff
+  const octokit = new Octokit({ auth: getGithubToken() })
+
   const inlineComments: { path: string; position: number; body: string }[] = []
+  const orphanFindings: ReviewFinding[] = []
 
   for (const finding of findings) {
-    if (!finding.file || finding.line === null) continue
+    if (!finding.file || finding.line === null) {
+      orphanFindings.push(finding)
+      continue
+    }
 
     const position = getDiffPosition(positionMap, finding.file, finding.line)
-    if (position === null) continue   // line not in diff, skip inline
+    if (position === null) {
+      orphanFindings.push(finding)
+      continue
+    }
 
     inlineComments.push({
       path: finding.file,
@@ -105,19 +139,115 @@ export async function postModelReview(
     })
   }
 
-  // Post as a single review (atomic — one block per model in the PR timeline)
-  await octokit.pulls.createReview({
+  const progress = `[${chunkIndex + 1}/${totalChunks}]`
+
+  if (inlineComments.length > 0) {
+    let body = `🤖 **\`${model}\`** ${progress} — **\`${filename}\`** — ${findings.length} finding(s)`
+
+    if (orphanFindings.length > 0) {
+      body += formatFindingsTable(orphanFindings)
+    }
+
+    await octokit.pulls.createReview({
+      owner,
+      repo,
+      pull_number: prNumber,
+      event: 'COMMENT',
+      body,
+      comments: inlineComments,
+    })
+  } else {
+    let body = `🤖 **\`${model}\`** ${progress} — **\`${filename}\`** — ${findings.length} finding(s)\n\n`
+    body += formatFindingsTable(findings)
+
+    await octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: prNumber,
+      body,
+    })
+  }
+
+  console.log(`  💬 ${model} posted ${findings.length} finding(s) for ${filename}`)
+}
+
+export async function postModelSummary(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  result: ModelReviewResult,
+): Promise<void> {
+  const octokit = new Octokit({ auth: getGithubToken() })
+
+  await octokit.issues.createComment({
     owner,
     repo,
-    pull_number: prNumber,
-    event: 'COMMENT',
+    issue_number: prNumber,
     body: formatSummaryComment(result),
-    comments: inlineComments,
   })
 
-  console.log(
-    `✅ ${model} posted ${inlineComments.length} inline comment(s) + summary`
-  )
+  console.log(`✅ ${result.model} summary posted`)
+}
+
+export async function postCrossReviewComment(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  stage1Results: ModelReviewResult[],
+  crossResults: CrossReviewResult[],
+): Promise<void> {
+  if (crossResults.length === 0) return
+
+  const octokit = new Octokit({ auth: getGithubToken() })
+
+  const allFindings: { model: string; finding: ReviewFinding }[] = []
+  for (const r of stage1Results) {
+    if (r.status === 'failed') continue
+    for (const f of r.findings) {
+      allFindings.push({ model: r.model, finding: f })
+    }
+  }
+
+  let body = `## 🔄 Cross-Review Results\n\n`
+  body += `Each model evaluated the other models' findings.\n\n`
+
+  for (const cr of crossResults) {
+    if (cr.status === 'failed') {
+      body += `### ❌ \`${cr.reviewerModel}\` — failed\n${cr.error}\n\n`
+      continue
+    }
+
+    const agrees = cr.verdicts.filter(v => v.verdict === 'agree').length
+    const disagrees = cr.verdicts.filter(v => v.verdict === 'disagree').length
+    const refines = cr.verdicts.filter(v => v.verdict === 'refine').length
+
+    body += `### 🤖 \`${cr.reviewerModel}\` — ✅ ${agrees} agree · ❌ ${disagrees} disagree · ✏️ ${refines} refine\n\n`
+
+    if (cr.verdicts.length > 0) {
+      body += `| # | Original Model | Finding | Verdict | Rationale |\n`
+      body += `|---|---|---|---|---|\n`
+
+      for (const v of cr.verdicts) {
+        const f = allFindings[v.findingIndex]
+        const title = f ? f.finding.title : `(finding #${v.findingIndex})`
+        const verdictEmoji = v.verdict === 'agree' ? '✅' : v.verdict === 'disagree' ? '❌' : '✏️'
+        const rationale = v.rationale.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+        body += `| ${v.findingIndex} | \`${v.originalModel}\` | ${title} | ${verdictEmoji} ${v.verdict} | ${rationale} |\n`
+      }
+      body += `\n`
+    }
+  }
+
+  body += `---\n⏱️ Cross-review completed`
+
+  await octokit.issues.createComment({
+    owner,
+    repo,
+    issue_number: prNumber,
+    body,
+  })
+
+  console.log(`🔄 Cross-review comment posted`)
 }
 
 export async function postCompletionComment(
@@ -134,19 +264,32 @@ export async function postCompletionComment(
     0
   )
 
-  let body = `## ✅ Code Review Complete\n\n`
-  body += `All models have finished reviewing PR #${prNumber}.\n\n`
-  body += `| Model | 🔴 Blocking | 🟡 Warning | 🔵 Suggestion | Total |\n`
-  body += `|---|---|---|---|---|\n`
+  const allCompleted = results.every(r => r.status === 'completed')
+  const anyFailed = results.some(r => r.status === 'failed' || r.status === 'partial')
+
+  let body = allCompleted
+    ? `## ✅ Code Review Complete\n\n`
+    : `## ⚠️ Code Review Complete (with failures)\n\n`
+
+  body += `| Model | Status | 🔴 Blocking | 🟡 Warning | 🔵 Suggestion | Total |\n`
+  body += `|---|---|---|---|---|---|\n`
 
   for (const r of results) {
     const blocking   = r.findings.filter(f => f.severity === 'blocking').length
     const warning    = r.findings.filter(f => f.severity === 'warning').length
     const suggestion = r.findings.filter(f => f.severity === 'suggestion').length
-    body += `| 🤖 \`${r.model}\` | ${blocking} | ${warning} | ${suggestion} | ${r.findings.length} |\n`
+    const statusLabel = r.status === 'completed' ? '✅'
+      : r.status === 'partial' ? `⚠️ ${r.chunksCompleted}/${r.chunksTotal}`
+      : '❌ failed'
+    body += `| 🤖 \`${r.model}\` | ${statusLabel} | ${blocking} | ${warning} | ${suggestion} | ${r.findings.length} |\n`
   }
 
   body += `\n**${results.length} models reviewed this PR — ${totalFindings} total finding(s)**`
+
+  if (anyFailed) {
+    const failedModels = results.filter(r => r.status !== 'completed')
+    body += `\n\n> ⚠️ **${failedModels.length} model(s) did not complete:** ${failedModels.map(r => `\`${r.model}\` (${r.error})`).join(', ')}`
+  }
 
   if (totalBlocking > 0) {
     body += `\n\n> ⚠️ **${totalBlocking} blocking issue(s) found.** Please address before merging.`

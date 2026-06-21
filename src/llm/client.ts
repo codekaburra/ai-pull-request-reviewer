@@ -1,6 +1,6 @@
 import OpenAI from 'openai'
 import { config } from '../config.js'
-import { SYSTEM_PROMPT, buildReviewPrompt } from './prompts.js'
+import { SYSTEM_PROMPT, buildReviewPrompt, FILE_REVIEW_SYSTEM_PROMPT, buildFileReviewPrompt } from './prompts.js'
 import type { ReviewFinding, DiffChunk } from '../types.js'
 
 let cachedClient: OpenAI | null = null
@@ -51,34 +51,93 @@ function parseFindings(raw: string, filename: string): ReviewFinding[] {
   }
 }
 
+export async function checkAvailableModels(models: string[]): Promise<{ available: string[]; missing: string[] }> {
+  const resp = await fetch(`${config.ollama.baseUrl}/api/tags`)
+  if (!resp.ok) {
+    throw new Error(`Cannot reach Ollama at ${config.ollama.baseUrl} — is it running?`)
+  }
+  const data = await resp.json() as { models: { name: string }[] }
+  const installed = new Set(data.models.map(m => m.name))
+
+  const available: string[] = []
+  const missing: string[] = []
+
+  for (const model of models) {
+    if (installed.has(model)) {
+      available.push(model)
+    } else {
+      missing.push(model)
+    }
+  }
+
+  return { available, missing }
+}
+
+export async function chatCompletion(
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  timeoutMs: number,
+): Promise<string> {
+  const client = getClient()
+
+  const response = await client.chat.completions.create(
+    {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.1,
+      // @ts-expect-error — Ollama-specific extra param not in OpenAI types
+      keep_alive: config.ollama.keepAlive,
+    },
+    { signal: AbortSignal.timeout(timeoutMs) },
+  )
+
+  return response.choices[0]?.message?.content ?? ''
+}
+
+export async function reviewFile(
+  model: string,
+  filename: string,
+  content: string,
+  timeoutMs: number,
+): Promise<ReviewFinding[]> {
+  const raw = await chatCompletion(
+    model,
+    FILE_REVIEW_SYSTEM_PROMPT,
+    buildFileReviewPrompt(filename, content),
+    timeoutMs,
+  )
+  return parseFindings(raw, filename)
+}
+
 export async function reviewChunk(
   model: string,
   chunk: DiffChunk,
   prTitle: string,
-  prDescription: string
+  prDescription: string,
+  timeoutMs: number,
 ): Promise<ReviewFinding[]> {
   const client = getClient()
 
   const userPrompt = buildReviewPrompt(prTitle, prDescription, chunk.filename, chunk.content)
 
-  try {
-    const response = await client.chat.completions.create({
+  const response = await client.chat.completions.create(
+    {
       model,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
-      temperature: 0.1,    // low temperature for consistent, focused output
-      // Ollama keep_alive: unload model from memory after response
+      temperature: 0.1,
       // @ts-expect-error — Ollama-specific extra param not in OpenAI types
       keep_alive: config.ollama.keepAlive,
-    })
+    },
+    { signal: AbortSignal.timeout(timeoutMs) },
+  )
 
-    const content = response.choices[0]?.message?.content ?? ''
-    return parseFindings(content, chunk.filename)
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.warn(`  ⚠️  ${model} failed on ${chunk.filename}: ${message}`)
-    return []
-  }
+  const content = response.choices[0]?.message?.content ?? ''
+  return parseFindings(content, chunk.filename)
 }
